@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+##
+## Letterbomb.
+## An easy to use static blog generator using markdown and html templates.
+
+function print_help {
+		echo "Usage: $(basename $0) [options] -i in_dir -o out_dir"
+		echo " -i=dir  Input directory containing markdown posts."
+		echo " -o=dir  Output directory for generated HTML pages."
+		echo " -t=dir  Directory containing user templates."
+		echo " -h      Print this help."
+}
+
+## check for dependencies
+##
+if ! which pandoc > /dev/null; then
+		echo "Error: Requires pandoc to generate html." >&2
+		exit 1
+fi
+
+## globals
+##
+BIN_ROOT=$(cd -P $(dirname "$0") && pwd)
+DEFAULT_TEMPLATES="$BIN_ROOT/templates"
+USER_TEMPLATES=''
+SOURCE_ROOT=''
+OUT_ROOT=''
+declare -A FILE_METADATA #file paths and properties
+
+# Post metadata is stored in an associative-array using the file path as a key.
+# Its value is a property string in the form: 'key1=val1|key2=val2|...'
+#
+function get_metadata_val {
+		local file="$1" key="$2" m_key='' m_val=''
+		IFS=$'|'
+		for x in ${FILE_METADATA["$file"]}; do
+				m_key=$(echo "$x" | cut -d '=' -f1)
+				if [[ "$m_key" == "$key" ]]; then
+						m_val=$(echo "$x" | cut -d '=' -f2)
+						break
+				fi
+		done
+		unset IFS
+		echo "$m_val"
+}
+
+# return a string of html meta tags. ignore title and template properties.
+#
+function create_metadata_html {
+		local file="$1" m_key='' m_val='' metadata_html=''
+		IFS=$'|'
+		for x in ${FILE_METADATA["$file"]}; do
+				m_key=$(echo "$x" | cut -d '=' -f1)
+				if [[ "$m_key" != "title" && "$m_key" != "template" ]]; then
+						m_val=$(echo "$x" | cut -d '=' -f2)
+						metadata_html="$metadata_html<meta name=\"$m_key\" content=\"$m_val\">\n"
+				fi
+		done
+		unset IFS
+		echo -e "$metadata_html"
+}
+
+# return path to html template specified in post, if none, use 'default'.
+# first check user-specified template directory, falling back to common.
+#
+function get_post_template {
+		local file="$1" tmpl_path=''
+		local tmpl_name=$(get_metadata_val "$file" "template")
+
+		if [ -z "$tmpl_name" ]; then tmpl_name="default"; fi
+
+		if [[ -n "$USER_TEMPLATES" && -f "$USER_TEMPLATES/$tmpl_name.html" ]]; then
+				tmpl_path="$USER_TEMPLATES/$tmpl_name.html"
+		fi
+		if [ -z "$tmpl_path" ]; then
+				tmpl_path="$DEFAULT_TEMPLATES/$tmpl_name.html"
+		fi
+		if [ ! -f "$tmpl_path" ]; then
+				echo "Error: '$tmpl_name' template not found for $file." >&2
+				tmpl_path=''
+		fi
+		echo "$tmpl_path"
+}
+
+# given a line 'key:val', extract field value and remove surrounding whitespace
+#
+function get_metadata_field {
+		local f="$1" line="$2"
+		echo "$line" | cut -d ':' -f "$f" | \
+				awk '{ gsub(/^[ \t]+|[ \t]+$/, ""); print }' | \
+				tr '[:blank:]' ' ' | tr -s '[:space:]'
+}
+
+MATCH_REMOVE_COMMENT_PREFIX='gsub(/^%%[[:space:]]*/, "") { print }' #awk
+
+# Store post properties. Metadata lines start with '%%' and contain 'key:value'
+#
+function extract_post_metadata {
+		local file="$1" metadata='' key='' val=''
+
+		if [ ! -f "$file" ]; then
+				echo "Error: Invalid file '$file'" >&2
+				exit 1
+		fi
+		while read line; do
+				key=$(get_metadata_field 1 "$line" | tr '[:upper:]' '[:lower:]')
+				val=$(get_metadata_field 2 "$line")
+				metadata="$metadata|$key=$val"
+		done < <(cat "$file" | awk "$MATCH_REMOVE_COMMENT_PREFIX" | grep -e '^.*:')
+
+		FILE_METADATA["$file"]="${metadata#|}" #remove extra |
+}
+
+# Convert markdown to html using pandoc and templates.
+#
+function convert_post {
+		local in_file="$1" out_dir="$2"
+		
+		if [[ ! -f "$in_file" || ! -d "$out_dir" ]]; then
+				echo "Error: Invalid arguments '$in_file', '$out_dir'" >&2
+				exit 1
+		fi
+		local out_file="$out_dir/$(basename $in_file '.md').html"
+		local title=$(get_metadata_val "$in_file" "title")
+		local metadata=$(create_metadata_html "$in_file")
+		local template=$(get_post_template "$in_file")
+		#error message in get_post_template, but must exit here
+		if [ -z "$template" ]; then exit 1; fi
+
+		#markdown to html, ignore '%%' comments
+		if cat "$in_file" | grep -v '^%%' | \
+				pandoc -f markdown -t html5 --smart --standalone \
+				--template "$template" --output "$out_file" \
+				-V title="$title" -V metadata="$metadata";
+		then
+				echo "    * $out_file"
+		else
+				echo "Error: Pandoc conversion from file '$in_file'" >&2
+				exit 1
+		fi
+}
+
+# Copy any files or directories to output directory, excluding .html files.
+#
+function copy_template_assets {
+		local in_dir="$1" out_dir="$2"
+		while read path; do
+				cp -a "$path" "$out_dir"
+		done < <(find "$in_dir" -depth 1 \( ! -iname "*.html" \))
+}
+
+# Copy any files or directories to output directory, excluding markdown
+# and any files that start with an underscore.
+#
+function copy_post_assets {
+		local in_dir="$1" out_dir="$2"
+		local out_dir_abs=$(cd -P "$out_dir" && pwd)
+
+		while read path; do
+				local path_abs=$(cd -P "$path" && pwd)
+				#if output dir is within post dir, do not copy self
+				if [[ "$path_abs" != "$out_dir_abs" ]]; then
+						cp -a "$path" "$out_dir"
+				fi
+		done < <(find "$in_dir" -depth 1 \( ! -iname "*.md" ! -name "_*" \))
+}
+
+# store metadata
+#
+function convert_all_posts {
+		local in_dir="$1" out_dir="$2"
+		while read path; do
+				extract_post_metadata "$path"
+				convert_post "$path" "$out_dir"
+		done < <(find "$in_dir" -type f -name '*.md' | grep -v -i 'readme')
+}
+
+## check command-line args
+##
+while getopts "i:o:t:h" option; do
+    case $option in
+				i) SOURCE_ROOT="$OPTARG";;
+				o) OUT_ROOT="$OPTARG";;
+				t) USER_TEMPLATES="$OPTARG";;
+        h) print_help; exit 0;;
+        \?) print_help; exit 0;;
+    esac
+done
+
+if [[ -z "$SOURCE_ROOT" || -z "$OUT_ROOT" ]]; then
+		print_help
+		exit 1
+fi
+
+if [ ! -d "$SOURCE_ROOT" ]; then
+		echo "Error: Invaild source directory '$SOURCE_ROOT'" >&2
+		exit 1
+fi
+
+if [[ -n "$USER_TEMPLATES" && ! -d "$USER_TEMPLATES" ]]; then
+		echo "Error: Invalid user template directory '$USER_TEMPLATES'" >&2
+		exit 1
+fi
+
+if [ ! -d "$OUT_ROOT" ]; then
+		mkdir "$OUT_ROOT"
+fi
+
+## and off we go ...
+
+## generate html posts from markdown sources and templates
+
+convert_all_posts "$SOURCE_ROOT" "$OUT_ROOT"
+
+## generate indicies [requires dates, links, descriptions]
+
+
+
+## copy assets from template and user sources. overwrite in this order:
+## 1. master template assets: everything except html files.
+## 2. user template assets: everything except html files.
+## 3. post directory assets: ignore markdown files and dirs staring with '_'.
+
+copy_template_assets "$DEFAULT_TEMPLATES" "$OUT_ROOT"
+
+if [ -n "$USER_TEMPLATES" ]; then
+		copy_template_assets "$USER_TEMPLATES" "$OUT_ROOT"
+fi
+
+copy_post_assets "$SOURCE_ROOT" "$OUT_ROOT"
+
+
+## generate rss feed
