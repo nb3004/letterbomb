@@ -17,6 +17,15 @@ if ! which pandoc > /dev/null; then
 		echo "Error: Requires pandoc to generate html." >&2
 		exit 1
 fi
+if ! which m4 > /dev/null; then
+		echo "Error: Requires m4 to generate html." >&2
+		exit 1
+fi
+
+## see 'man strftime' for options
+DATE_IN_FORMAT="%b %d %Y" #Feb 11 2013
+DATE_OUT_FORMAT="%c" #Sun Feb 10 18:16:07 2013
+INDEX_POST_COUNT='' #number. if empty, put all posts on single page
 
 ## globals
 ##
@@ -51,8 +60,12 @@ function create_metadata_html {
 		IFS=$'|'
 		for x in ${FILE_METADATA["$file"]}; do
 				m_key=$(echo "$x" | cut -d '=' -f1)
-				if [[ "$m_key" != "title" && "$m_key" != "template" ]]; then
+				if [[ "$m_key" != "title" && "$m_key" != "template" && "$m_key" != "link" ]]; then
 						m_val=$(echo "$x" | cut -d '=' -f2)
+						#date stored as unix seconds for sorting, convert to timestap
+						if [[ "$m_key" == "date" ]]; then
+								m_val=$(date -j -f %s "$m_val" "+$DATE_OUT_FORMAT")
+						fi
 						metadata_html="$metadata_html<meta name=\"$m_key\" content=\"$m_val\">\n"
 				fi
 		done
@@ -82,6 +95,18 @@ function get_post_template {
 		echo "$tmpl_path"
 }
 
+# Convert a human readable date to unix minutes for sorting.
+#
+function parse_date_format {
+		local date_str="$0" date_sec=''
+		# adds current seconds to timestap, not desired
+		if ! date_sec=$(date -j -f "$DATE_IN_FORMAT" "$date_str" +%s 2> /dev/null); then
+				echo "Error: Unable to parse date '$date_str'"
+				exit 1
+		fi
+		echo "$date_sec"
+}
+
 # given a line 'key:val', extract field value and remove surrounding whitespace
 #
 function get_metadata_field {
@@ -91,24 +116,35 @@ function get_metadata_field {
 				tr '[:blank:]' ' ' | tr -s '[:space:]'
 }
 
-MATCH_REMOVE_COMMENT_PREFIX='gsub(/^%%[[:space:]]*/, "") { print }' #awk
+MATCH_REMOVE_COMMENT_PREFIX="gsub(/^%%[[:space:]]*/, \"\") { print }" #awk
 
 # Store post properties. Metadata lines start with '%%' and contain 'key:value'
 #
 function extract_post_metadata {
-		local file="$1" metadata='' key='' val=''
+		local file="$1" key='' val=''
 
 		if [ ! -f "$file" ]; then
 				echo "Error: Invalid file '$file'" >&2
 				exit 1
 		fi
+
+		local metadata="link=$(basename $file | sed 's/\..*$//g').html"
+
 		while read line; do
 				key=$(get_metadata_field 1 "$line" | tr '[:upper:]' '[:lower:]')
 				val=$(get_metadata_field 2 "$line")
+				if [[ "$key" == "date" ]]; then
+						val=$(parse_date_format "$val")
+				fi
 				metadata="$metadata|$key=$val"
 		done < <(cat "$file" | awk "$MATCH_REMOVE_COMMENT_PREFIX" | grep -e '^.*:')
 
-		FILE_METADATA["$file"]="${metadata#|}" #remove extra |
+		#add defaults if not there
+		if ! echo "$metadata" | grep "date=" > /dev/null; then
+				#file modification time in unix seconds
+				metadata="$metadata|date=$(stat -f %Dm $file)"
+		fi
+		FILE_METADATA["$file"]="$metadata"
 }
 
 # Convert markdown to html using pandoc and templates.
@@ -120,7 +156,7 @@ function convert_post {
 				echo "Error: Invalid arguments '$in_file', '$out_dir'" >&2
 				exit 1
 		fi
-		local out_file="$out_dir/$(basename $in_file '.md').html"
+		local out_file="$out_dir/$(get_metadata_val $in_file 'link')"
 		local title=$(get_metadata_val "$in_file" "title")
 		local metadata=$(create_metadata_html "$in_file")
 		local template=$(get_post_template "$in_file")
@@ -150,7 +186,7 @@ function copy_template_assets {
 }
 
 # Copy any files or directories to output directory, excluding markdown
-# and any files that start with an underscore.
+# and any files that start with a period or underscore.
 #
 function copy_post_assets {
 		local in_dir="$1" out_dir="$2"
@@ -162,7 +198,7 @@ function copy_post_assets {
 				if [[ "$path_abs" != "$out_dir_abs" ]]; then
 						cp -a "$path" "$out_dir"
 				fi
-		done < <(find "$in_dir" -depth 1 \( ! -iname "*.md" ! -name "_*" \))
+		done < <(find "$in_dir" -depth 1 \( ! -iname "*.md" ! -name ".*" ! -name "_*" \))
 }
 
 # store metadata
@@ -173,6 +209,44 @@ function convert_all_posts {
 				extract_post_metadata "$path"
 				convert_post "$path" "$out_dir"
 		done < <(find "$in_dir" -type f -name '*.md' | grep -v -i 'readme')
+}
+
+## generates an index of posts using a template. if given a post count,
+## create multiple index pages containing that many posts.
+## TODO: doesn't suppport multiple indicies, post count not implemented
+##
+function generate_index {
+		local post_count="$1" sort_group='' list_html='<ol>'
+		
+		for f in "${!FILE_METADATA[@]}"; do
+				local m_date=$(get_metadata_val "$f" 'date')
+				local m_link=$(get_metadata_val "$f" 'link')
+				local m_title=$(get_metadata_val "$f" 'title')
+				sort_group="$m_date|$m_link|$m_title\n$sort_group"
+		done
+
+		while read line; do
+				local url=$(echo "$line" | cut -d '|' -f2)
+				local title=$(echo "$line" | cut -d '|' -f3)
+				if [ -z "$title" ]; then title=$(basename "$url" ".html"); fi
+				list_html="$list_html\n<li><a href='./$url'>$title</a></li>"
+		done < <(echo -e "${sort_group%\\n}" | sort -t '|' -r)
+
+		list_html=$(echo -e "$list_html\n</ol>")
+		
+		#TODO: command-line arg?
+		local site_title="A Sample Title"
+
+		#TODO: index template is inconsistent, can't use $title$ form?
+		if m4 --define "__TITLE__=$site_title" \
+				--define "__INDEX__=$list_html" \
+				"$DEFAULT_TEMPLATES/index.html" > "$OUT_ROOT/index.html";
+		then
+				echo "    * $OUT_ROOT/index.html"
+		else
+				echo "Error: Unable to create index file." >&2
+				exit 1
+		fi
 }
 
 ## check command-line args
@@ -208,13 +282,15 @@ fi
 
 ## and off we go ...
 
+echo "Generating files ..."
+
 ## generate html posts from markdown sources and templates
 
 convert_all_posts "$SOURCE_ROOT" "$OUT_ROOT"
 
 ## generate indicies [requires dates, links, descriptions]
 
-
+generate_index "$INDEX_POST_COUNT"
 
 ## copy assets from template and user sources. overwrite in this order:
 ## 1. master template assets: everything except html files.
@@ -229,5 +305,4 @@ fi
 
 copy_post_assets "$SOURCE_ROOT" "$OUT_ROOT"
 
-
-## generate rss feed
+## TODO: generate rss feed
