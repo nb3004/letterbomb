@@ -1,17 +1,22 @@
 # Letterbomb.
 
 An easy to use static blog generator that wants to get out
-of the way. Posts are written in [Markdown](http://daringfireball.net/projects/markdown/syntax) 
-and inserted into HTML templates. Use the defaults or create
-your own. Metadata and template selection are handled
-within the entry using a specially formatted header. With
-styles and templates kept separate, writing new posts is
+of the way. Leveraging the awesomeness of
+[Pandoc](http://johnmacfarlane.net/pandoc/README.html),
+posts can be written in your favorite document markup style,
+including [Markdown](http://daringfireball.net/projects/markdown/syntax),
+[Textile](http://redcloth.org/textile), and [LaTeX](http://www.latex-project.org/).
+These posts are inserted into templates which are customized
+using plain old HTML and CSS. Metadata and template
+selection can be set per post using a specially formatted
+header. With content, templates, and styles kept separate,
+writing new creating new posts and maintaining your site is
 designed to be easy.
 
 ## Usage
 
-Requires [Pandoc](http://johnmacfarlane.net/pandoc/) to
-convert Markdown to HTML.
+First, install [Pandoc](http://johnmacfarlane.net/pandoc/)
+to generate the HTML.
 
 Given a input directory containing posts written in
 Markdown, output the generated site to the `./html` directory:
@@ -21,7 +26,7 @@ $ letterbomb -i ./posts -o ./html
 ~~~
 
 Letterbomb includes a collection of default templates, or,
-if you'd like, use additional ones or override the
+if you'd like, add additional ones to override the
 defaults. Just specify a directory containing user
 templates:
 
@@ -67,16 +72,6 @@ document as `<meta>` tags.
 * Generate rss feed
 
 ## Notes
-
-OSX requires a more recent version of bash
-(associative-array support). If using [Homebrew](http://mxcl.github.com/homebrew/),
-you can upgrade like so:
-
-~~~
-$ brew install bash
-$ sudo bash -c "echo /usr/local/bin/bash" >> /etc/shells
-$ chsh -s /usr/local/bin/bash
-~~~
 
 If you're looking for a good (and free) web hosting for
 static pages, checkout the

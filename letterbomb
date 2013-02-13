@@ -35,11 +35,98 @@ USER_TEMPLATES=''
 SOURCE_ROOT=''
 OUT_ROOT=''
 
-#file paths and properties. TODO: associative-arrays not supported in osx stock bash :/
-if ! declare -A FILE_METADATA > /dev/null 2>&1; then
-		echo "Error: Associative arrays not supported in this version of bash. Exiting."  >&2
-		exit 1
-fi
+function date_format_output {
+		local secs="$1"
+		echo $(date -j -f %s "$secs" "+$DATE_OUT_FORMAT")
+}
+
+# Convert a human readable date to unix minutes for sorting.
+#
+function parse_date_format {
+		local date_str="$0" date_sec=''
+		# adds current seconds to timestap, not desired
+		if ! date_sec=$(date -j -f "$DATE_IN_FORMAT" "$date_str" +%s 2> /dev/null); then
+				echo "Error: Unable to parse date '$date_str'"
+				exit 1
+		fi
+		echo "$date_sec"
+}
+
+## post metadata, a pseudo-assoc-array to work on older versions of bash
+## array elements are stored as: 'filename;key1=val1|key2=val2|...'
+declare -a POSTS
+
+function POSTS_set {
+		local key="$1" val="$2"
+		if [[ "$key" == *\;* ]]; then
+				echo "Error: key '$key' shan't contain the ';' character." >&2
+				exit 1
+		else
+				local i=0 is_member=0
+				for (( ; i < "${#POSTS[@]}"; i++ )); do
+						if [[ "$key" == $(echo "${POSTS[$i]}" | cut -d ';' -f1) ]]; then
+								POSTS[$i]="$key;$val"
+								is_member=1
+								break
+						fi
+				done
+				if [[ $is_member == 0 ]]; then
+						POSTS+=("$key;$val")
+				fi
+		fi
+}
+
+function POSTS_get {
+		local key="$1" val='' record
+		for record in "${POSTS[@]}"; do
+				if [[ "$key" == $(echo "$record" | cut -d ';' -f1) ]]; then
+						val=$(echo "$record" | cut -d ';' -f2)
+						break
+				fi
+		done
+		echo "$val"
+}
+
+function POSTS_get_property {
+		local props="$(POSTS_get $1)" prop_key="$2" prop_val=''
+		if [ -n "$props" ]; then
+				IFS=$'|'
+				for prop in ${props[@]}; do
+						if [[ "$prop_key" == $(echo "$prop" | cut -d '=' -f1) ]]; then
+								prop_val=$(echo "$prop" | cut -d '=' -f2)
+								break
+						fi
+				done
+				unset IFS
+		fi
+		echo "$prop_val"
+}
+
+function POSTS_set_property {
+		local key="$1" prop_key="$2" prop_val="$3"
+		
+		if [ -n "$(POSTS_get_property $key $prop_key)" ]; then
+				echo "Error: Key '$key:$prop_key' already exists." >&2
+				exit 1
+		else
+				local record props contains_key=0
+				for record in "${POSTS[@]}"; do
+						if [[ "$key" == $(echo "$record" | cut -d ';' -f1) ]]; then
+								props=$(echo "$record" | cut -d ';' -f2)
+								if [ -z "$props" ]; then
+										POSTS_set "$key" "$prop_key=$prop_val"
+								else
+										POSTS_set "$key" "$props|$prop_key=$prop_val"
+								fi
+								contains_key=1
+								break
+						fi
+				done
+				if [[ $contains_key == 0 ]]; then
+						POSTS_set "$key" "$prop_key=$prop_val"
+				fi
+		fi
+}
 
 #files with a supported extension are passed to pandoc, otherwise copied over.
 #for a list of pandoc input formats: pandoc -h
@@ -75,41 +162,39 @@ function abspath {
 		cd "$oldpwd"
 }
 
-# Post metadata is stored in an associative-array using the file path as a key.
-# Its value is a property string in the form: 'key1=val1|key2=val2|...'
-#
-function get_metadata_val {
-		local file="$1" key="$2" m_key='' m_val=''
-		IFS=$'|'
-		for x in ${FILE_METADATA["$file"]}; do
-				m_key=$(echo "$x" | cut -d '=' -f1)
-				if [[ "$m_key" == "$key" ]]; then
-						m_val=$(echo "$x" | cut -d '=' -f2)
+## certain post metadata has special use and shouldn't become html meta tags
+declare -a META_TAG_IGNORE=('title' 'template' 'url')
+
+function is_meta_tag {
+		local test_tag="$1" val=1
+		for tag in "${META_TAG_IGNORE[@]}"; do
+				if [[ "$test_tag" == "$tag" ]]; then
+						val=0
 						break
 				fi
 		done
-		unset IFS
-		echo "$m_val"
+		echo $val
 }
 
 # return a string of html meta tags. ignore title and template properties.
 #
 function create_metadata_html {
-		local file="$1" m_key='' m_val='' metadata_html=''
+		local post_key="$1" key='' val='' metadata_html=''
+		local props=$(POSTS_get "$post_key") prop
 		IFS=$'|'
-		for x in ${FILE_METADATA["$file"]}; do
-				m_key=$(echo "$x" | cut -d '=' -f1)
-				if [[ "$m_key" != "title" && "$m_key" != "template" && "$m_key" != "link" ]]; then
-						m_val=$(echo "$x" | cut -d '=' -f2)
+		for prop in $(echo "$props"); do
+				key=$(echo "$prop" | cut -d '=' -f1)
+				if [[ $(is_meta_tag "$key") == 1 ]]; then
+						val=$(echo "$prop" | cut -d '=' -f2)
 						#date stored as unix seconds for sorting, convert to timestap
-						if [[ "$m_key" == "date" ]]; then
-								m_val=$(date -j -f %s "$m_val" "+$DATE_OUT_FORMAT")
+						if [[ "$key" == "date" ]]; then
+								val=$(date_format_output "$val")
 						fi
-						metadata_html="$metadata_html<meta name=\"$m_key\" content=\"$m_val\">\n"
+						metadata_html="$metadata_html<meta name=\"$key\" content=\"$val\">\n"
 				fi
 		done
 		unset IFS
-		echo -e "$metadata_html"
+		echo -e -n "$metadata_html"
 }
 
 # return path to html template specified in post, if none, use 'default'.
@@ -117,7 +202,7 @@ function create_metadata_html {
 #
 function get_post_template {
 		local file="$1" tmpl_path=''
-		local tmpl_name=$(get_metadata_val "$file" "template")
+		local tmpl_name=$(POSTS_get_property "$file" "template")
 
 		if [ -z "$tmpl_name" ]; then tmpl_name="default"; fi
 
@@ -132,18 +217,6 @@ function get_post_template {
 				tmpl_path=''
 		fi
 		echo "$tmpl_path"
-}
-
-# Convert a human readable date to unix minutes for sorting.
-#
-function parse_date_format {
-		local date_str="$0" date_sec=''
-		# adds current seconds to timestap, not desired
-		if ! date_sec=$(date -j -f "$DATE_IN_FORMAT" "$date_str" +%s 2> /dev/null); then
-				echo "Error: Unable to parse date '$date_str'"
-				exit 1
-		fi
-		echo "$date_sec"
 }
 
 # given a line 'key:val', extract field value and remove surrounding whitespace
@@ -167,23 +240,23 @@ function extract_post_metadata {
 				exit 1
 		fi
 
-		local metadata="link=$(basename $file | sed 's/\..*$//g').html"
-
 		while read line; do
 				key=$(get_metadata_field 1 "$line" | tr '[:upper:]' '[:lower:]')
 				val=$(get_metadata_field 2 "$line")
 				if [[ "$key" == "date" ]]; then
 						val=$(parse_date_format "$val")
 				fi
-				metadata="$metadata|$key=$val"
+				POSTS_set_property "$file" "$key" "$val"
 		done < <(cat "$file" | awk "$MATCH_REMOVE_COMMENT_PREFIX" | grep -e '^.*:')
 
 		#add defaults if not there
-		if ! echo "$metadata" | grep "date=" > /dev/null; then
+		if [ -z "$(POSTS_get_property $file 'date')" ]; then
 				#file modification time in unix seconds
-				metadata="$metadata|date=$(stat -f %Dm $file)"
+				POSTS_set_property "$file" "date" "$(stat -f %Dm $file)"
 		fi
-		FILE_METADATA["$file"]="$metadata"
+		if [ -z "$(POSTS_get_property $file 'url')" ]; then
+				POSTS_set_property "$file" "url" "$(basename $file | sed 's/\..*$//g').html"
+		fi
 }
 
 # Convert markdown to html using pandoc and templates.
@@ -195,8 +268,8 @@ function convert_post {
 				echo "Error: Invalid arguments '$in_file', '$out_dir'" >&2
 				exit 1
 		fi
-		local out_file="$out_dir/$(get_metadata_val $in_file 'link')"
-		local title=$(get_metadata_val "$in_file" "title")
+		local out_file="$out_dir/$(POSTS_get_property $in_file 'url')"
+		local title=$(POSTS_get_property "$in_file" "title")
 		local metadata=$(create_metadata_html "$in_file")
 		local template=$(get_post_template "$in_file")
 		#error message in get_post_template, but must exit here
@@ -263,20 +336,22 @@ function iterate_posts {
 ## TODO: doesn't suppport multiple indicies, post count not implemented
 ##
 function generate_index {
-		local post_count="$1" sort_group='' list_html='<ol>'
-		
-		for f in "${!FILE_METADATA[@]}"; do
-				local m_date=$(get_metadata_val "$f" 'date')
-				local m_link=$(get_metadata_val "$f" 'link')
-				local m_title=$(get_metadata_val "$f" 'title')
-				sort_group="$m_date|$m_link|$m_title\n$sort_group"
+		local post_count="$1" list_html='<ol>'
+		local record key prop_date prop_url prop_title sort_group
+
+		for record in "${POSTS[@]}"; do
+				key=$(echo "$record" | cut -d ';' -f1)
+				prop_date=$(POSTS_get_property "$key" 'date')
+				prop_url=$(POSTS_get_property "$key" 'url')
+				prop_title=$(POSTS_get_property "$key" 'title')
+				sort_group="$prop_date|$prop_url|$prop_title\n$sort_group"
 		done
 
 		while read line; do
-				local url=$(echo "$line" | cut -d '|' -f2)
-				local title=$(echo "$line" | cut -d '|' -f3)
-				if [ -z "$title" ]; then title=$(basename "$url" ".html"); fi
-				list_html="$list_html\n<li><a href='./$url'>$title</a></li>"
+				prop_url=$(echo "$line" | cut -d '|' -f2)
+				prop_title=$(echo "$line" | cut -d '|' -f3)
+				if [ -z "$prop_title" ]; then prop_title=$(basename "$prop_url" ".html"); fi
+				list_html="$list_html\n<li><a href='./$prop_url'>$prop_title</a></li>"
 		done < <(echo -e "${sort_group%\\n}" | sort -t '|' -r)
 
 		list_html=$(echo -e "$list_html\n</ol>")
