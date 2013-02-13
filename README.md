@@ -33,6 +33,10 @@ If a template is not found among these, Letterbomb will
 check the default templates next. If it still can't find it,
 you'll get an error message.
 
+*Note:* When Letterbomb looks in your posts directory, readme
+files and any files/directories that start with a period or
+underscore are ignored and not copied to the destination folder.
+
 ## Metadata
 
 Metadata and template selection are specified in the header
@@ -58,6 +62,22 @@ document as `<meta>` tags.
 ## TODO
 
 * Lots!
-* Generate indicies
+* Better index
 * Non-test templates
 * Generate rss feed
+
+## Notes
+
+OSX requires a more recent version of bash
+(associative-array support). If using [Homebrew](http://mxcl.github.com/homebrew/),
+you can upgrade like so:
+
+~~~
+$ brew install bash
+$ sudo bash -c "echo /usr/local/bin/bash" >> /etc/shells
+$ chsh -s /usr/local/bin/bash
+~~~
+
+If you're looking for a good (and free) web hosting for
+static pages, checkout the
+[GitHub Pages](http://pages.github.com/) feature.
