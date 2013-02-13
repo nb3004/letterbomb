@@ -34,7 +34,46 @@ DEFAULT_TEMPLATES="$BIN_ROOT/templates"
 USER_TEMPLATES=''
 SOURCE_ROOT=''
 OUT_ROOT=''
-declare -A FILE_METADATA #file paths and properties
+
+#file paths and properties. TODO: associative-arrays not supported in osx stock bash :/
+if ! declare -A FILE_METADATA > /dev/null; then
+		echo "Error: Associative arrays not supported in this version of bash. Exiting."  >&2
+		exit 1
+fi
+
+#files with a supported extension are passed to pandoc, otherwise copied over.
+#for a list of pandoc input formats: pandoc -h
+declare -a PANDOC_EXTS=('md' 'markdown' 'html' 'json' 'latex' 'textile' 'rst')
+
+## test if an extenstion type is supported, 0 for false, 1 for true.
+## accepts a extenstion suffix or a file path.
+##
+function is_supported_ext {
+		local test_ext="$(basename $1)" val=0
+		test_ext="${test_ext#*.}"
+		for ext in "${PANDOC_EXTS[@]}"; do
+				if [[ "$test_ext" == "$ext" ]]; then
+						val=1
+						break
+				fi
+		done
+		echo $val
+}
+
+## absolute file path. because osx doesn't have readlink -f
+##
+function abspath {
+		local path="$1" oldpwd="$PWD"
+		if [ -d "$path" ]; then
+				cd "$path"
+				dirs -l +0
+		else
+				cd "$(dirname $path)"
+				local d=$(dirs -l +0)
+				echo "${d%/}/${path##*/}"
+		fi
+		cd "$oldpwd"
+}
 
 # Post metadata is stored in an associative-array using the file path as a key.
 # Its value is a property string in the form: 'key1=val1|key2=val2|...'
@@ -165,14 +204,27 @@ function convert_post {
 
 		#markdown to html, ignore '%%' comments
 		if cat "$in_file" | grep -v '^%%' | \
-				pandoc -f markdown -t html5 --smart --standalone \
+				pandoc -t html5 --smart --standalone \
 				--template "$template" --output "$out_file" \
 				-V title="$title" -V metadata="$metadata";
 		then
 				echo "    * $out_file"
 		else
-				echo "Error: Pandoc conversion from file '$in_file'" >&2
+				echo "Error: Unable to convert file '$in_file'" >&2
 				exit 1
+		fi
+}
+
+# Copy any files or directories to output directory, excluding markdown
+# and any files that start with a period or underscore.
+#
+function copy_asset {
+		local in_file="$1" out_dir="$2"
+		#if output dir is within post dir, do not copy self
+		if [[ "$(abspath $in_file)" != "$(abspath $out_dir)" ]]; then
+				cp -a "$in_file" "$out_dir"
+		else
+				echo "Warning: Unable to copy asset '$in_file', skipping." >&2
 		fi
 }
 
@@ -181,34 +233,29 @@ function convert_post {
 function copy_template_assets {
 		local in_dir="$1" out_dir="$2"
 		while read path; do
-				cp -a "$path" "$out_dir"
-		done < <(find "$in_dir" -depth 1 \( ! -iname "*.html" \))
+				copy_asset "$path" "$out_dir"
+		done < <(find "$in_dir" -depth 1 \( ! -name ".*" ! -name "_*" ! -iname "readme.*" ! -iname "*.html" \))
 }
 
-# Copy any files or directories to output directory, excluding markdown
-# and any files that start with a period or underscore.
-#
-function copy_post_assets {
+## iterate over posts directory, decide whether to convert or copy.
+## readmes and files that start with a period or underscore are ignored.
+##
+function iterate_posts {
 		local in_dir="$1" out_dir="$2"
-		local out_dir_abs=$(cd -P "$out_dir" && pwd)
 
 		while read path; do
-				local path_abs=$(cd -P "$path" && pwd)
-				#if output dir is within post dir, do not copy self
-				if [[ "$path_abs" != "$out_dir_abs" ]]; then
-						cp -a "$path" "$out_dir"
+				if [[ ! -d "$path" && $(is_supported_ext "$path") == 1 ]]; then
+						extract_post_metadata "$path"
+						convert_post "$path" "$out_dir"
+				else
+						copy_asset "$path" "$out_dir"
 				fi
-		done < <(find "$in_dir" -depth 1 \( ! -iname "*.md" ! -name ".*" ! -name "_*" \))
-}
+		done < <(find "$in_dir" -depth 1 \( ! -name ".*" ! -name "_*" ! -iname "readme.*" \))
 
-# store metadata
-#
-function convert_all_posts {
-		local in_dir="$1" out_dir="$2"
+		#display warning for ignored files, just in case
 		while read path; do
-				extract_post_metadata "$path"
-				convert_post "$path" "$out_dir"
-		done < <(find "$in_dir" -type f -name '*.md' | grep -v -i 'readme')
+				echo "Warning: Ignoring file '$path'" >&2
+		done < <(find "$in_dir" -depth 1 \( -name ".*" -or -name "_*" -or -iname "readme.*" \))
 }
 
 ## generates an index of posts using a template. if given a post count,
@@ -238,8 +285,7 @@ function generate_index {
 		local site_title="A Sample Title"
 
 		#TODO: index template is inconsistent, can't use $title$ form?
-		if m4 --define "__TITLE__=$site_title" \
-				--define "__INDEX__=$list_html" \
+		if m4 --define "__TITLE__=$site_title" --define "__INDEX__=$list_html" \
 				"$DEFAULT_TEMPLATES/index.html" > "$OUT_ROOT/index.html";
 		then
 				echo "    * $OUT_ROOT/index.html"
@@ -280,22 +326,10 @@ if [ ! -d "$OUT_ROOT" ]; then
 		mkdir "$OUT_ROOT"
 fi
 
-## and off we go ...
-
-echo "Generating files ..."
-
-## generate html posts from markdown sources and templates
-
-convert_all_posts "$SOURCE_ROOT" "$OUT_ROOT"
-
-## generate indicies [requires dates, links, descriptions]
-
-generate_index "$INDEX_POST_COUNT"
-
 ## copy assets from template and user sources. overwrite in this order:
 ## 1. master template assets: everything except html files.
 ## 2. user template assets: everything except html files.
-## 3. post directory assets: ignore markdown files and dirs staring with '_'.
+## 3. post directory assets
 
 copy_template_assets "$DEFAULT_TEMPLATES" "$OUT_ROOT"
 
@@ -303,6 +337,14 @@ if [ -n "$USER_TEMPLATES" ]; then
 		copy_template_assets "$USER_TEMPLATES" "$OUT_ROOT"
 fi
 
-copy_post_assets "$SOURCE_ROOT" "$OUT_ROOT"
+## and off we go ...
+
+echo "Generating files ..."
+
+## generate html posts from templates, copy user assets.
+
+iterate_posts "$SOURCE_ROOT" "$OUT_ROOT"
+
+generate_index "$INDEX_POST_COUNT"
 
 ## TODO: generate rss feed
