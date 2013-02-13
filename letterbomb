@@ -36,7 +36,7 @@ SOURCE_ROOT=''
 OUT_ROOT=''
 
 #file paths and properties. TODO: associative-arrays not supported in osx stock bash :/
-if ! declare -A FILE_METADATA > /dev/null; then
+if ! declare -A FILE_METADATA > /dev/null 2>&1; then
 		echo "Error: Associative arrays not supported in this version of bash. Exiting."  >&2
 		exit 1
 fi
